@@ -44,7 +44,7 @@ const tools: Tool[] = [
   },
   {
     name: 'check_quality',
-    description: 'Check code quality based on project type',
+    description: 'Check code quality based on project type. Supports both fast (logic-based) and deep (AI-powered) analysis modes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -56,6 +56,31 @@ const tools: Tool[] = [
           type: 'string',
           description: 'Override detected project type',
           enum: ['react', 'react-native', 'java', 'nodejs', 'nextjs', 'nest', 'dotnet', 'angular', 'firebase', 'aws-amplify'],
+        },
+        deepAnalysis: {
+          type: 'boolean',
+          description: 'Enable AI-powered deep analysis (slower but more accurate). Default: false',
+          default: false,
+        },
+        aiEnabled: {
+          type: 'boolean',
+          description: 'Enable AI analysis (alternative to deepAnalysis). Default: false',
+          default: false,
+        },
+        checkUnusedCode: {
+          type: 'boolean',
+          description: 'Check for unused code. Default: true',
+          default: true,
+        },
+        checkComplexity: {
+          type: 'boolean',
+          description: 'Check code complexity (requires deep analysis). Default: false',
+          default: false,
+        },
+        checkSecurity: {
+          type: 'boolean',
+          description: 'Check for security issues (requires deep analysis). Default: false',
+          default: false,
         }
       },
       required: ['projectPath'],
@@ -117,11 +142,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const projectPath = args?.projectPath as string;
         const projectTypeOverride = args?.projectType as string | undefined;
 
+        // Extract analysis options
+        const options = {
+          deepAnalysis: args?.deepAnalysis as boolean ?? false,
+          aiEnabled: args?.aiEnabled as boolean ?? false,
+          checkUnusedCode: args?.checkUnusedCode as boolean ?? true,
+          checkComplexity: args?.checkComplexity as boolean ?? false,
+          checkSecurity: args?.checkSecurity as boolean ?? false,
+        };
+
         const projectInfo = projectTypeOverride
           ? { types: [projectTypeOverride], isMultiProject: false }
           : await detector.detectProject(projectPath, true);
 
-        const qualityReport = await analyzer.analyzeQuality(projectPath, projectInfo);
+        const qualityReport = await analyzer.analyzeQuality(projectPath, projectInfo, options);
 
         return {
           content: [
@@ -135,10 +169,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_recommendations': {
         const projectPath = args?.projectPath as string;
-        const language = args?.language as string ?? 'he';
 
         const projectInfo = await detector.detectProject(projectPath, true);
-        const recommendations = await analyzer.getRecommendations(projectPath, projectInfo, language);
+        const recommendations = await analyzer.getRecommendations(projectPath, projectInfo);
 
         return {
           content: [

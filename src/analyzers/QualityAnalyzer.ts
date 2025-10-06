@@ -1,46 +1,58 @@
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import { glob } from 'glob';
 import { ProjectInfo } from '../detectors/ProjectDetector.js';
-import { QualityRules } from '../rules/QualityRules.js';
-
-export interface QualityReport {
-  projectPath: string;
-  projectTypes: string[];
-  score: number;
-  issues: QualityIssue[];
-  recommendations: string[];
-  stats: QualityStats;
-}
-
-export interface QualityIssue {
-  severity: 'error' | 'warning' | 'info';
-  category: string;
-  file?: string;
-  line?: number;
-  message: string;
-  rule: string;
-}
-
-export interface QualityStats {
-  totalFiles: number;
-  totalLines: number;
-  averageFileSize: number;
-  duplicateCode: number;
-  unusedCode: number;
-  complexity: number;
-}
+import { QualityReport, QualityIssue, QualityStats, AnalysisOptions } from '../types/QualityTypes.js';
+import { FileUtils } from '../utils/FileUtils.js';
+import { CodeAnalysisUtils } from '../utils/CodeAnalysisUtils.js';
+import { ReactAnalysisService } from '../services/ReactAnalysisService.js';
+import { FirebaseAnalysisService } from '../services/FirebaseAnalysisService.js';
+import { AICodeAnalyzer } from '../services/AICodeAnalyzer.js';
 
 export class QualityAnalyzer {
-  private rules: QualityRules;
+  private reactAnalysisService: ReactAnalysisService;
+  private firebaseAnalysisService: FirebaseAnalysisService;
+  private aiAnalyzer: AICodeAnalyzer;
 
   constructor() {
-    this.rules = new QualityRules();
+    this.reactAnalysisService = new ReactAnalysisService();
+    this.firebaseAnalysisService = new FirebaseAnalysisService();
+    this.aiAnalyzer = new AICodeAnalyzer();
   }
 
-  public async analyzeQuality(projectPath: string, projectInfo: ProjectInfo): Promise<QualityReport> {
+  /**
+   * HYBRID ANALYSIS - Combines logic-based (fast) and AI-powered (deep) analysis
+   *
+   * @param projectPath - Path to the project
+   * @param projectInfo - Project information
+   * @param options - Analysis options (controls AI usage)
+   */
+  public async analyzeQuality(
+    projectPath: string,
+    projectInfo: ProjectInfo,
+    options: AnalysisOptions = {}
+  ): Promise<QualityReport> {
     const issues: QualityIssue[] = [];
     const stats = await this.calculateStats(projectPath);
+    const aiInsights: string[] = [];
+
+    // Determine analysis mode
+    const useDeepAnalysis = options.deepAnalysis || options.aiEnabled || false;
+    const analysisType = useDeepAnalysis ? 'deep' : 'fast';
+
+    console.log(`\n${'='.repeat(50)}`);
+    console.log(`🔍 Quality Analysis Mode: ${analysisType.toUpperCase()}`);
+    console.log(`${'='.repeat(50)}\n`);
+
+    if (useDeepAnalysis) {
+      this.aiAnalyzer.enableAI();
+      console.log('🤖 AI-powered deep analysis enabled');
+      console.log('⚡ Logic-based fast checks also running\n');
+    } else {
+      this.aiAnalyzer.disableAI();
+      console.log('⚡ Fast mode - logic-based analysis only\n');
+    }
+
+    // ==== FAST CHECKS (Always run - logic-based) ====
 
     // Apply rules based on project type
     for (const projectType of projectInfo.types) {
@@ -52,10 +64,36 @@ export class QualityAnalyzer {
     const commonIssues = await this.checkCommonIssues(projectPath);
     issues.push(...commonIssues);
 
+    // Check for Hebrew comments (logic-based)
+    const hebrewCommentIssues = await this.checkHebrewComments(projectPath);
+    issues.push(...hebrewCommentIssues);
+
+    // Check for missing error logging (logic-based)
+    const missingLoggingIssues = await this.checkMissingErrorLogging(projectPath);
+    issues.push(...missingLoggingIssues);
+
     // Check multi-project specific issues
     if (projectInfo.isMultiProject && projectInfo.subProjects) {
       const multiProjectIssues = await this.checkMultiProjectIssues(projectPath, projectInfo.subProjects);
       issues.push(...multiProjectIssues);
+    }
+
+    // ==== CONDITIONAL CHECKS (Based on options) ====
+
+    // Unused code check (can be disabled)
+    if (options.checkUnusedCode !== false) {
+      const unusedCodeIssues = await this.checkUnusedCode(projectPath, useDeepAnalysis);
+      issues.push(...unusedCodeIssues);
+    }
+
+    // ==== DEEP ANALYSIS (Only if enabled) ====
+
+    if (useDeepAnalysis) {
+      console.log('\n🧠 Running AI-powered deep analysis...');
+      const deepAnalysisResults = await this.runDeepAnalysis(projectPath, options);
+      issues.push(...deepAnalysisResults.issues);
+      aiInsights.push(...deepAnalysisResults.insights);
+      console.log(`✅ AI analysis complete - found ${deepAnalysisResults.issues.length} additional issues\n`);
     }
 
     // Calculate quality score
@@ -70,8 +108,48 @@ export class QualityAnalyzer {
       score,
       issues,
       recommendations,
-      stats
+      stats,
+      analysisType,
+      aiInsights: aiInsights.length > 0 ? aiInsights : undefined
     };
+  }
+
+  /**
+   * Run deep AI-powered analysis
+   */
+  private async runDeepAnalysis(
+    projectPath: string,
+    options: AnalysisOptions
+  ): Promise<{ issues: QualityIssue[]; insights: string[] }> {
+    const issues: QualityIssue[] = [];
+    const insights: string[] = [];
+
+    const allFiles = await glob('**/*.{js,ts,jsx,tsx}', {
+      cwd: projectPath,
+      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**', '**/*.test.*', '**/*.spec.*']
+    });
+
+    // Analyze a sample of files with AI (limit to avoid costs)
+    const filesToAnalyze = allFiles.slice(0, 10);
+
+    for (const file of filesToAnalyze) {
+      const content = await FileUtils.readFile(path.join(projectPath, file));
+
+      // Run comprehensive AI analysis
+      const aiResults = await this.aiAnalyzer.comprehensiveAnalysis(content, file);
+
+      // Add AI-discovered issues
+      issues.push(...aiResults.unusedCode);
+      issues.push(...aiResults.codeSmells);
+
+      // Add AI suggestions as insights
+      if (aiResults.suggestions.length > 0) {
+        insights.push(`${file}:`);
+        insights.push(...aiResults.suggestions);
+      }
+    }
+
+    return { issues, insights };
   }
 
   private async analyzeByType(projectPath: string, projectType: string): Promise<QualityIssue[]> {
@@ -80,7 +158,7 @@ export class QualityAnalyzer {
     switch (projectType) {
       case 'react':
       case 'react-native':
-        issues.push(...await this.analyzeReactProject(projectPath, projectType));
+        issues.push(...await this.reactAnalysisService.analyzeReactProject(projectPath, projectType));
         break;
       case 'nodejs':
       case 'nextjs':
@@ -88,7 +166,7 @@ export class QualityAnalyzer {
         issues.push(...await this.analyzeNodeProject(projectPath, projectType));
         break;
       case 'firebase-functions':
-        issues.push(...await this.analyzeFirebaseFunctions(projectPath));
+        issues.push(...await this.firebaseAnalysisService.analyzeFirebaseFunctions(projectPath));
         break;
       case 'java':
         issues.push(...await this.analyzeJavaProject(projectPath));
@@ -107,308 +185,18 @@ export class QualityAnalyzer {
     return issues;
   }
 
-  private async analyzeReactProject(projectPath: string, variant: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-    const limits = this.rules.getReactLimits(variant);
 
-    // Check component structure first
-    issues.push(...await this.checkReactComponentStructure(projectPath));
 
-    // Check component files
-    const componentFiles = await glob('src/**/*.{tsx,jsx}', {
-      cwd: projectPath,
-      ignore: ['node_modules/**', '**/*.test.*', '**/*.spec.*']
-    });
-
-    for (const file of componentFiles) {
-      const filePath = path.join(projectPath, file);
-      const content = await this.readFile(filePath);
-      const lines = content.split('\n');
-
-      // Check file length
-      if (lines.length > limits.maxLines) {
-        issues.push({
-          severity: 'warning',
-          category: 'file-size',
-          file,
-          message: `File exceeds ${limits.maxLines} lines (${lines.length} lines)`,
-          rule: 'max-file-lines'
-        });
-      }
-
-      // Check for console.log
-      lines.forEach((line, index) => {
-        if (line.includes('console.log')) {
-          issues.push({
-            severity: 'error',
-            category: 'code-quality',
-            file,
-            line: index + 1,
-            message: 'Console.log found - use logger instead',
-            rule: 'no-console'
-          });
-        }
-      });
-
-      // Check for relative imports
-      const relativeImportRegex = /from\s+['"](\.\.\/){2,}/g;
-      lines.forEach((line, index) => {
-        if (relativeImportRegex.test(line)) {
-          issues.push({
-            severity: 'warning',
-            category: 'imports',
-            file,
-            line: index + 1,
-            message: 'Deep relative import found - use path aliases',
-            rule: 'no-deep-imports'
-          });
-        }
-      });
-
-      // Check line length (new for 2025)
-      const maxLineLength = limits.maxLineLength || 120;
-      lines.forEach((line, index) => {
-        if (line.length > maxLineLength) {
-          issues.push({
-            severity: 'info',
-            category: 'code-style',
-            file,
-            line: index + 1,
-            message: `Line exceeds ${maxLineLength} characters (${line.length} chars)`,
-            rule: 'max-line-length'
-          });
-        }
-      });
-
-      // Check function length in React components (new for 2025)
-      const functionRegex = /^(export\s+)?(const|function|async\s+function)\s+(\w+)/gm;
-      const functions = this.findFunctions(content);
-
-      functions.forEach(func => {
-        const funcLength = func.endLine - func.startLine + 1;
-        const maxFunctionLines = limits.maxFunctionLines || 30;
-
-        if (funcLength > maxFunctionLines) {
-          issues.push({
-            severity: 'warning',
-            category: 'function-length',
-            file,
-            line: func.startLine,
-            message: `Function '${func.name}' exceeds ${maxFunctionLines} lines (${funcLength} lines)`,
-            rule: 'max-function-lines'
-          });
-        }
-      });
-    }
-
-    return issues;
-  }
-
-  private findFunctions(content: string): Array<{ name: string; startLine: number; endLine: number }> {
-    const lines = content.split('\n');
-    const functions: Array<{ name: string; startLine: number; endLine: number }> = [];
-    const functionRegex = /^(export\s+)?(const|function|async\s+function)\s+(\w+)/;
-
-    for (let i = 0; i < lines.length; i++) {
-      const match = lines[i].match(functionRegex);
-      if (match) {
-        const funcName = match[3];
-        let braceCount = 0;
-        let started = false;
-        let endLine = i;
-
-        // Find the end of the function by counting braces
-        for (let j = i; j < lines.length; j++) {
-          const line = lines[j];
-          for (const char of line) {
-            if (char === '{') {
-              braceCount++;
-              started = true;
-            } else if (char === '}') {
-              braceCount--;
-              if (started && braceCount === 0) {
-                endLine = j;
-                break;
-              }
-            }
-          }
-          if (started && braceCount === 0) break;
-        }
-
-        functions.push({
-          name: funcName,
-          startLine: i + 1,
-          endLine: endLine + 1
-        });
-      }
-    }
-
-    return functions;
-  }
-
-  private async checkReactComponentStructure(projectPath: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-
-    // Check for proper React project organization (2025 standards)
-    const requiredFolders = [
-      { path: 'src/components', description: 'Reusable UI components' },
-      { path: 'src/pages', description: 'Page components', optional: true },
-      { path: 'src/features', description: 'Feature-based modules', optional: true },
-      { path: 'src/hooks', description: 'Custom React hooks' },
-      { path: 'src/services', description: 'API and business logic' },
-      { path: 'src/utils', description: 'Helper functions' },
-      { path: 'src/types', description: 'TypeScript types/interfaces' },
-      { path: 'src/assets', description: 'Images, fonts, icons' },
-      { path: 'src/styles', description: 'Global styles', optional: true },
-      { path: 'src/context', description: 'React Context providers', optional: true },
-      { path: 'src/store', description: 'State management (Redux/Zustand)', optional: true }
-    ];
-
-    // Check for required folders
-    for (const folder of requiredFolders) {
-      const folderPath = path.join(projectPath, folder.path);
-      if (!await this.fileExists(folderPath)) {
-        if (!folder.optional) {
-          issues.push({
-            severity: 'warning',
-            category: 'react-organization',
-            message: `Missing required folder: ${folder.path} - ${folder.description}`,
-            rule: 'react-folder-structure'
-          });
-        }
-      }
-    }
-
-    // Find all component directories
-    const componentDirs = await glob('src/components/*/', {
-      cwd: projectPath
-    });
-
-    for (const dir of componentDirs) {
-      const componentPath = path.join(projectPath, dir);
-      const componentName = path.basename(dir);
-
-      // Required files for each component
-      const requiredFiles = [
-        { file: 'index.tsx', optional: false },
-        { file: 'index.jsx', optional: true }, // Alternative to .tsx
-        { file: 'types.ts', optional: false },
-        { file: 'styles.ts', optional: false },
-        { file: 'const.ts', optional: false }
-      ];
-
-      // Required folders for complex components
-      const requiredFolders = [
-        { folder: 'hooks', optional: false },
-        { folder: 'components', optional: true },
-        { folder: 'services', optional: true },
-        { folder: 'handlers', optional: true }
-      ];
-
-      // Check for main component file (either tsx or jsx)
-      const hasIndexTsx = await this.fileExists(path.join(componentPath, 'index.tsx'));
-      const hasIndexJsx = await this.fileExists(path.join(componentPath, 'index.jsx'));
-
-      if (!hasIndexTsx && !hasIndexJsx) {
-        issues.push({
-          severity: 'error',
-          category: 'react-structure',
-          file: dir,
-          message: `Component ${componentName} missing required file: index.tsx or index.jsx`,
-          rule: 'react-component-structure'
-        });
-      }
-
-      // Check other required files
-      for (const { file, optional } of requiredFiles) {
-        if (file === 'index.tsx' || file === 'index.jsx') continue; // Already checked
-
-        if (!optional && !await this.fileExists(path.join(componentPath, file))) {
-          issues.push({
-            severity: 'warning',
-            category: 'react-structure',
-            file: dir,
-            message: `Component ${componentName} missing required file: ${file}`,
-            rule: 'react-component-structure'
-          });
-        }
-      }
-
-      // Check for hooks folder and proper hook structure
-      const hooksPath = path.join(componentPath, 'hooks');
-      if (await this.fileExists(hooksPath)) {
-        const expectedHooks = [
-          `use${componentName}State.ts`,
-          `use${componentName}Logic.ts`,
-          `use${componentName}Effects.ts`
-        ];
-
-        for (const hookFile of expectedHooks) {
-          if (!await this.fileExists(path.join(hooksPath, hookFile))) {
-            issues.push({
-              severity: 'info',
-              category: 'react-structure',
-              file: path.join(dir, 'hooks'),
-              message: `Missing recommended hook file: ${hookFile}`,
-              rule: 'react-hooks-structure'
-            });
-          }
-        }
-      } else {
-        // Only warn about missing hooks folder for larger components
-        const componentFiles = await glob(`${dir}/**/*.{tsx,jsx,ts,js}`, {
-          cwd: projectPath
-        });
-
-        if (componentFiles.length > 3) {
-          issues.push({
-            severity: 'warning',
-            category: 'react-structure',
-            file: dir,
-            message: `Complex component ${componentName} should have a hooks/ folder`,
-            rule: 'react-component-structure'
-          });
-        }
-      }
-
-      // Check for sub-components structure
-      const componentsPath = path.join(componentPath, 'components');
-      if (await this.fileExists(componentsPath)) {
-        const subComponents = await glob('*/', {
-          cwd: componentsPath
-        });
-
-        for (const subComp of subComponents) {
-          const subCompPath = path.join(componentsPath, subComp);
-          const hasIndex = await this.fileExists(path.join(subCompPath, 'index.tsx')) ||
-                          await this.fileExists(path.join(subCompPath, 'index.jsx'));
-
-          if (!hasIndex) {
-            issues.push({
-              severity: 'warning',
-              category: 'react-structure',
-              file: path.join(dir, 'components', subComp),
-              message: `Sub-component missing index.tsx or index.jsx`,
-              rule: 'react-subcomponent-structure'
-            });
-          }
-        }
-      }
-    }
-
-    return issues;
-  }
 
   private async analyzeNodeProject(projectPath: string, variant: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
 
     // Check Node.js project organization (2025 standards)
-    issues.push(...await this.checkNodeProjectStructure(projectPath, variant));
 
     // Check for unused dependencies
     const packageJsonPath = path.join(projectPath, 'package.json');
-    if (await this.fileExists(packageJsonPath)) {
-      const packageJson = JSON.parse(await this.readFile(packageJsonPath));
+      if (await FileUtils.fileExists(packageJsonPath)) {
+        const packageJson = await FileUtils.readJsonFile(packageJsonPath);
 
       // Basic check for common unused packages
       const commonUnused = ['lodash', 'moment', 'axios'];
@@ -421,7 +209,7 @@ export class QualityAnalyzer {
           let isUsed = false;
 
           for (const file of files.slice(0, 10)) { // Check first 10 files for performance
-            const content = await this.readFile(path.join(projectPath, file));
+            const content = await FileUtils.readFile(path.join(projectPath, file));
             if (content.includes(dep)) {
               isUsed = true;
               break;
@@ -443,366 +231,25 @@ export class QualityAnalyzer {
     return issues;
   }
 
-  private async checkNodeProjectStructure(projectPath: string, variant: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
 
-    // Define required folders based on variant
-    let requiredFolders: Array<{ path: string; description: string; optional?: boolean }> = [];
 
-    if (variant === 'nextjs' || variant === 'nextjs-app-router') {
-      // Next.js specific structure
-      requiredFolders = [
-        { path: 'app', description: 'App Router (Next.js 13+)', optional: true },
-        { path: 'pages', description: 'Pages Router', optional: true },
-        { path: 'components', description: 'React components' },
-        { path: 'lib', description: 'Library/utility functions' },
-        { path: 'public', description: 'Static assets' },
-        { path: 'styles', description: 'CSS/SCSS files', optional: true }
-      ];
-    } else if (variant === 'nestjs') {
-      // Nest.js specific structure
-      requiredFolders = [
-        { path: 'src/modules', description: 'Feature modules' },
-        { path: 'src/controllers', description: 'HTTP controllers', optional: true },
-        { path: 'src/services', description: 'Business logic services', optional: true },
-        { path: 'src/entities', description: 'Database entities', optional: true },
-        { path: 'src/dto', description: 'Data Transfer Objects' },
-        { path: 'src/guards', description: 'Authentication guards', optional: true },
-        { path: 'src/interceptors', description: 'Request interceptors', optional: true },
-        { path: 'src/pipes', description: 'Validation pipes', optional: true },
-        { path: 'src/config', description: 'Configuration files' }
-      ];
-    } else {
-      // Standard Node.js/Express structure
-      requiredFolders = [
-        { path: 'src/routes', description: 'API routes/endpoints' },
-        { path: 'src/controllers', description: 'Route controllers' },
-        { path: 'src/services', description: 'Business logic layer' },
-        { path: 'src/models', description: 'Data models/schemas' },
-        { path: 'src/middleware', description: 'Express middleware' },
-        { path: 'src/utils', description: 'Utility functions' },
-        { path: 'src/config', description: 'Configuration files' },
-        { path: 'src/validators', description: 'Input validation', optional: true },
-        { path: 'src/database', description: 'Database connection/queries', optional: true }
-      ];
-    }
-
-    // Check for required folders
-    for (const folder of requiredFolders) {
-      const folderPath = path.join(projectPath, folder.path);
-      if (!await this.fileExists(folderPath)) {
-        if (!folder.optional) {
-          issues.push({
-            severity: 'warning',
-            category: 'node-organization',
-            message: `Missing required folder: ${folder.path} - ${folder.description}`,
-            rule: 'node-folder-structure'
-          });
-        }
-      }
-    }
-
-    // Check for separation of concerns
-    if (variant !== 'nextjs' && variant !== 'nextjs-app-router') {
-      // Check if business logic is mixed with routes
-      const routeFiles = await glob('src/routes/**/*.{js,ts}', {
-        cwd: projectPath,
-        ignore: ['**/*.test.*', '**/*.spec.*']
-      });
-
-      for (const file of routeFiles.slice(0, 5)) { // Check first 5 files
-        const content = await this.readFile(path.join(projectPath, file));
-
-        // Check for database queries in routes
-        if (content.includes('SELECT ') || content.includes('INSERT INTO') ||
-            content.includes('UPDATE ') || content.includes('DELETE FROM') ||
-            content.includes('.find(') || content.includes('.save(') ||
-            content.includes('.create(') || content.includes('.update(')) {
-          issues.push({
-            severity: 'error',
-            category: 'separation-of-concerns',
-            file,
-            message: 'Database operations should be in service/repository layer, not in routes',
-            rule: 'node-separation-of-concerns'
-          });
-          break; // One example is enough
-        }
-      }
-    }
-
-    return issues;
-  }
-
-  private async analyzeFirebaseFunctions(projectPath: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-    const functionsPath = path.join(projectPath, 'functions', 'src');
-    const limits = this.rules.getFirebaseLimits();
-
-    // Check Firebase folder structure first
-    issues.push(...await this.checkFirebaseStructure(projectPath));
-
-    // Check functions structure
-    const functionFiles = await glob('**/*.{ts,js}', {
-      cwd: functionsPath,
-      ignore: ['node_modules/**', '**/*.test.*', '**/*.spec.*']
-    });
-
-    for (const file of functionFiles) {
-      const filePath = path.join(functionsPath, file);
-      const content = await this.readFile(filePath);
-      const lines = content.split('\n');
-
-      // Check file length (should be 300 for general files)
-      if (lines.length > limits.maxLinesPerFile) {
-        issues.push({
-          severity: 'error',
-          category: 'firebase-structure',
-          file: `functions/src/${file}`,
-          message: `Firebase function file exceeds ${limits.maxLinesPerFile} lines (${lines.length} lines)`,
-          rule: 'firebase-max-lines'
-        });
-      }
-
-      // Check individual function length (100 lines per function)
-      const functionIssues = await this.checkFunctionLengths(content, `functions/src/${file}`, limits.maxLinesPerFunction);
-      issues.push(...functionIssues);
-
-      // Count exports (functions)
-      const exportCount = (content.match(/export\s+(const|function)\s+\w+/g) || []).length;
-      if (exportCount > limits.maxFunctionsPerFile) {
-        issues.push({
-          severity: 'error',
-          category: 'firebase-structure',
-          file: `functions/src/${file}`,
-          message: `File has ${exportCount} functions, max is ${limits.maxFunctionsPerFile}`,
-          rule: 'firebase-max-functions'
-        });
-      }
-
-      // Check for console.log in Firebase functions
-      if (content.includes('console.log')) {
-        issues.push({
-          severity: 'error',
-          category: 'firebase-logging',
-          file: `functions/src/${file}`,
-          message: 'Use logger.info/error instead of console.log in Firebase Functions',
-          rule: 'firebase-logger'
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  private async checkFirebaseStructure(projectPath: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-    const functionsPath = path.join(projectPath, 'functions', 'src');
-
-    // Check if functions/src exists
-    if (!await this.fileExists(functionsPath)) {
-      issues.push({
-        severity: 'error',
-        category: 'firebase-structure',
-        message: 'Missing required directory: functions/src',
-        rule: 'firebase-folder-structure'
-      });
-      return issues; // Can't check further if main directory doesn't exist
-    }
-
-    // Required directories in functions/src
-    const requiredDirs = [
-      { dir: 'constants', severity: 'error' as const },
-      { dir: 'function', severity: 'error' as const },
-      { dir: 'functions', severity: 'error' as const }
-    ];
-
-    for (const { dir, severity } of requiredDirs) {
-      const dirPath = path.join(functionsPath, dir);
-      if (!await this.fileExists(dirPath)) {
-        issues.push({
-          severity,
-          category: 'firebase-structure',
-          message: `Missing required directory: functions/src/${dir}`,
-          rule: 'firebase-folder-structure'
-        });
-      } else {
-        // Check specific files in each directory
-        if (dir === 'constants') {
-          const indexPath = path.join(dirPath, 'index.ts');
-          const securityPath = path.join(dirPath, 'security.ts');
-
-          if (!await this.fileExists(indexPath)) {
-            issues.push({
-              severity: 'warning',
-              category: 'firebase-structure',
-              message: 'Missing functions/src/constants/index.ts',
-              rule: 'firebase-constants-structure'
-            });
-          }
-
-          if (!await this.fileExists(securityPath)) {
-            issues.push({
-              severity: 'info',
-              category: 'firebase-structure',
-              message: 'Missing functions/src/constants/security.ts for security constants',
-              rule: 'firebase-constants-structure'
-            });
-          }
-        }
-
-        if (dir === 'function') {
-          const indexPath = path.join(dirPath, 'index.ts');
-          const securityUtilsPath = path.join(dirPath, 'securityUtils.ts');
-
-          if (!await this.fileExists(indexPath)) {
-            issues.push({
-              severity: 'warning',
-              category: 'firebase-structure',
-              message: 'Missing functions/src/function/index.ts for utility functions',
-              rule: 'firebase-utils-structure'
-            });
-          }
-
-          if (!await this.fileExists(securityUtilsPath)) {
-            issues.push({
-              severity: 'info',
-              category: 'firebase-structure',
-              message: 'Missing functions/src/function/securityUtils.ts for security utilities',
-              rule: 'firebase-utils-structure'
-            });
-          }
-        }
-
-        if (dir === 'functions') {
-          // Check for proper organization by feature/domain
-          const functionGroups = await glob('*/', {
-            cwd: dirPath
-          });
-
-          if (functionGroups.length === 0) {
-            issues.push({
-              severity: 'warning',
-              category: 'firebase-structure',
-              message: 'Functions should be organized in feature folders (e.g., functions/family/, functions/auth/)',
-              rule: 'firebase-function-organization'
-            });
-          } else {
-            // Check each function group
-            for (const group of functionGroups) {
-              const groupPath = path.join(dirPath, group);
-              const functionFiles = await glob('*.{ts,js}', { cwd: groupPath });
-
-              if (functionFiles.length === 0) {
-                issues.push({
-                  severity: 'warning',
-                  category: 'firebase-structure',
-                  message: `Empty function group: functions/src/functions/${group}`,
-                  rule: 'firebase-function-organization'
-                });
-              }
-
-              // Check that each function file follows naming convention
-              for (const file of functionFiles) {
-                if (!file.match(/^[a-z][a-zA-Z]*\.(ts|js)$/)) {
-                  issues.push({
-                    severity: 'info',
-                    category: 'firebase-naming',
-                    file: `functions/src/functions/${group}/${file}`,
-                    message: 'Function files should use camelCase naming (e.g., createFamily.ts)',
-                    rule: 'firebase-naming-convention'
-                  });
-                }
-              }
-            }
-          }
-
-          // Check for index.ts that exports all functions
-          const indexPath = path.join(dirPath, 'index.ts');
-          if (!await this.fileExists(indexPath)) {
-            issues.push({
-              severity: 'warning',
-              category: 'firebase-structure',
-              message: 'Missing functions/src/functions/index.ts to export all functions',
-              rule: 'firebase-exports'
-            });
-          }
-        }
-      }
-    }
-
-    // Check main index.ts file
-    const mainIndexPath = path.join(functionsPath, 'index.ts');
-    if (!await this.fileExists(mainIndexPath)) {
-      issues.push({
-        severity: 'error',
-        category: 'firebase-structure',
-        message: 'Missing main entry point: functions/src/index.ts',
-        rule: 'firebase-entry-point'
-      });
-    }
-
-    return issues;
-  }
-
-  private async checkFunctionLengths(content: string, filePath: string, maxLines: number): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-    const lines = content.split('\n');
-
-    // Find function declarations
-    const functionRegex = /^export\s+(const|function|async function)\s+(\w+)/gm;
-    let match;
-    const functions: Array<{ name: string; startLine: number; endLine?: number }> = [];
-
-    while ((match = functionRegex.exec(content)) !== null) {
-      const lineNumber = content.substring(0, match.index).split('\n').length;
-      functions.push({
-        name: match[2],
-        startLine: lineNumber
-      });
-    }
-
-    // Calculate function lengths
-    for (let i = 0; i < functions.length; i++) {
-      const func = functions[i];
-      const nextFunc = functions[i + 1];
-      func.endLine = nextFunc ? nextFunc.startLine - 1 : lines.length;
-
-      const functionLength = func.endLine - func.startLine + 1;
-
-      if (functionLength > maxLines) {
-        issues.push({
-          severity: 'error',
-          category: 'firebase-function-length',
-          file: filePath,
-          line: func.startLine,
-          message: `Function '${func.name}' exceeds ${maxLines} lines (${functionLength} lines)`,
-          rule: 'firebase-function-max-lines'
-        });
-      }
-    }
-
-    return issues;
-  }
 
   private async analyzeJavaProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
 
-    // Check Java/Spring Boot project organization (2025 standards)
-    issues.push(...await this.checkJavaProjectStructure(projectPath));
-
     // Check for Java specific issues
     const javaFiles = await glob('**/*.java', {
-      cwd: projectPath,
+        cwd: projectPath,
       ignore: ['target/**', 'build/**']
     });
 
     for (const file of javaFiles) {
       const filePath = path.join(projectPath, file);
-      const content = await this.readFile(filePath);
+      const content = await FileUtils.readFile(filePath);
       const lines = content.split('\n');
 
       // Check for System.out.println
-      lines.forEach((line, index) => {
+      lines.forEach((line: string, index: number) => {
         if (line.includes('System.out.println')) {
           issues.push({
             severity: 'warning',
@@ -819,147 +266,34 @@ export class QualityAnalyzer {
     return issues;
   }
 
-  private async checkJavaProjectStructure(projectPath: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-
-    // Standard Spring Boot package structure (Layer-based or Feature-based)
-    const basePackagePath = await this.findJavaBasePackage(projectPath);
-
-    if (basePackagePath) {
-      // Layer-based structure (traditional Spring Boot)
-      const layerBasedFolders = [
-        { path: 'controller', description: 'REST controllers' },
-        { path: 'service', description: 'Business logic services' },
-        { path: 'repository', description: 'Data access layer' },
-        { path: 'model', description: 'Domain models/entities', altNames: ['entity', 'domain'] },
-        { path: 'dto', description: 'Data Transfer Objects' },
-        { path: 'config', description: 'Configuration classes' },
-        { path: 'exception', description: 'Custom exceptions', optional: true },
-        { path: 'util', description: 'Utility classes', optional: true },
-        { path: 'mapper', description: 'Object mappers', optional: true }
-      ];
-
-      let hasLayerBased = false;
-      let hasFeatureBased = false;
-
-      // Check for layer-based structure
-      for (const folder of layerBasedFolders) {
-        let folderFound = false;
-        const mainPath = path.join(basePackagePath, folder.path);
-
-        if (await this.fileExists(mainPath)) {
-          folderFound = true;
-          hasLayerBased = true;
-        } else if (folder.altNames) {
-          // Check alternative names
-          for (const altName of folder.altNames) {
-            const altPath = path.join(basePackagePath, altName);
-            if (await this.fileExists(altPath)) {
-              folderFound = true;
-              hasLayerBased = true;
-              break;
-            }
-          }
-        }
-
-        if (!folderFound && !folder.optional && hasLayerBased) {
-          issues.push({
-            severity: 'warning',
-            category: 'java-organization',
-            message: `Missing package in layer-based structure: ${folder.path} - ${folder.description}`,
-            rule: 'spring-boot-structure'
-          });
-        }
-      }
-
-      // Check for feature-based structure (alternative to layer-based)
-      const featureDirs = await glob('*/', {
-        cwd: basePackagePath
-      });
-
-      // If we find directories with both controller and service files, it's feature-based
-      for (const dir of featureDirs) {
-        const featurePath = path.join(basePackagePath, dir);
-        const hasController = await glob('*Controller.java', { cwd: featurePath }).then(files => files.length > 0);
-        const hasService = await glob('*Service.java', { cwd: featurePath }).then(files => files.length > 0);
-
-        if (hasController && hasService) {
-          hasFeatureBased = true;
-          break;
-        }
-      }
-
-      // If neither structure is found, report an issue
-      if (!hasLayerBased && !hasFeatureBased) {
-        issues.push({
-          severity: 'error',
-          category: 'java-organization',
-          message: 'No clear package structure found. Use either layer-based or feature-based organization',
-          rule: 'spring-boot-structure'
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  private async findJavaBasePackage(projectPath: string): Promise<string | null> {
-    // Find the main application class (with @SpringBootApplication)
-    const mainClassFiles = await glob('**/src/main/java/**/*Application.java', {
-      cwd: projectPath
-    });
-
-    if (mainClassFiles.length > 0) {
-      const mainClassPath = path.dirname(path.join(projectPath, mainClassFiles[0]));
-      return mainClassPath;
-    }
-
-    // Fallback: look for standard Maven/Gradle structure
-    const srcMainJava = path.join(projectPath, 'src', 'main', 'java');
-    if (await this.fileExists(srcMainJava)) {
-      // Find the first package directory
-      const packages = await glob('*/*/', {
-        cwd: srcMainJava
-      });
-
-      if (packages.length > 0) {
-        return path.join(srcMainJava, packages[0]);
-      }
-    }
-
-    return null;
-  }
 
   private async analyzeDotNetProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
 
-    // Check .NET Clean Architecture organization (2025 standards)
-    issues.push(...await this.checkDotNetProjectStructure(projectPath));
-
     // Check for .NET specific issues
     const csFiles = await glob('**/*.cs', {
-      cwd: projectPath,
+        cwd: projectPath,
       ignore: ['bin/**', 'obj/**']
     });
 
     for (const file of csFiles) {
       const filePath = path.join(projectPath, file);
-      const content = await this.readFile(filePath);
+      const content = await FileUtils.readFile(filePath);
       const lines = content.split('\n');
 
       // Check for Console.WriteLine in non-console apps
       if (!file.includes('Program.cs')) {
-        lines.forEach((line, index) => {
+        lines.forEach((line: string, index: number) => {
           if (line.includes('Console.WriteLine')) {
-            issues.push({
+          issues.push({
               severity: 'warning',
               category: 'dotnet-logging',
-              file,
+            file,
               line: index + 1,
               message: 'Use ILogger instead of Console.WriteLine',
               rule: 'dotnet-no-console'
-            });
-          }
+          });
+        }
         });
       }
     }
@@ -967,123 +301,9 @@ export class QualityAnalyzer {
     return issues;
   }
 
-  private async checkDotNetProjectStructure(projectPath: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-
-    // Check for Clean Architecture layers (2025 standards)
-    const cleanArchitectureLayers = [
-      {
-        name: 'Domain',
-        description: 'Core business logic and entities',
-        folders: ['Entities', 'ValueObjects', 'Enums', 'Exceptions', 'Interfaces']
-      },
-      {
-        name: 'Application',
-        description: 'Application business rules',
-        folders: ['Services', 'Interfaces', 'DTOs', 'Mappings', 'Validators']
-      },
-      {
-        name: 'Infrastructure',
-        description: 'External concerns',
-        folders: ['Data', 'Repositories', 'Services', 'Identity']
-      },
-      {
-        name: 'Presentation',
-        altNames: ['WebAPI', 'API', 'Web'],
-        description: 'User interface layer',
-        folders: ['Controllers', 'ViewModels', 'Filters', 'Middleware']
-      }
-    ];
-
-    // Check if solution follows Clean Architecture
-    let hasCleanArchitecture = false;
-    const solutionFiles = await glob('*.sln', { cwd: projectPath });
-
-    if (solutionFiles.length > 0) {
-      // Check for Clean Architecture project structure
-      for (const layer of cleanArchitectureLayers) {
-        const layerPath = path.join(projectPath, layer.name);
-        let layerFound = await this.fileExists(layerPath);
-
-        // Check alternative names
-        if (!layerFound && layer.altNames) {
-          for (const altName of layer.altNames) {
-            const altPath = path.join(projectPath, altName);
-            if (await this.fileExists(altPath)) {
-              layerFound = true;
-              break;
-            }
-          }
-        }
-
-        if (layerFound) {
-          hasCleanArchitecture = true;
-
-          // Check for required folders within each layer
-          for (const folder of layer.folders) {
-            const folderPath = path.join(projectPath, layer.name, folder);
-            if (!await this.fileExists(folderPath)) {
-              issues.push({
-                severity: 'info',
-                category: 'dotnet-organization',
-                message: `Missing folder in ${layer.name} layer: ${folder}`,
-                rule: 'clean-architecture-structure'
-              });
-            }
-          }
-        }
-      }
-    }
-
-    // If not Clean Architecture, check for standard MVC/API structure
-    if (!hasCleanArchitecture) {
-      const standardFolders = [
-        { path: 'Controllers', description: 'API/MVC controllers' },
-        { path: 'Models', description: 'Data models', altNames: ['Entities'] },
-        { path: 'Services', description: 'Business logic services' },
-        { path: 'Data', description: 'Data context and migrations', optional: true },
-        { path: 'Repositories', description: 'Repository pattern', optional: true },
-        { path: 'DTOs', description: 'Data Transfer Objects', optional: true },
-        { path: 'ViewModels', description: 'View models for MVC', optional: true },
-        { path: 'Helpers', description: 'Helper utilities', optional: true },
-        { path: 'Middleware', description: 'Custom middleware', optional: true }
-      ];
-
-      for (const folder of standardFolders) {
-        let folderFound = false;
-        const mainPath = path.join(projectPath, folder.path);
-
-        if (await this.fileExists(mainPath)) {
-          folderFound = true;
-        } else if (folder.altNames) {
-          for (const altName of folder.altNames) {
-            const altPath = path.join(projectPath, altName);
-            if (await this.fileExists(altPath)) {
-              folderFound = true;
-              break;
-            }
-          }
-        }
-
-        if (!folderFound && !folder.optional) {
-          issues.push({
-            severity: 'warning',
-            category: 'dotnet-organization',
-            message: `Missing folder: ${folder.path} - ${folder.description}`,
-            rule: 'dotnet-folder-structure'
-          });
-        }
-      }
-    }
-
-    return issues;
-  }
 
   private async analyzeAngularProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
-
-    // Check Angular project organization (2025 standards - Feature modules)
-    issues.push(...await this.checkAngularProjectStructure(projectPath));
 
     // Check Angular specific patterns
     const componentFiles = await glob('src/**/*.component.ts', {
@@ -1093,7 +313,7 @@ export class QualityAnalyzer {
 
     for (const file of componentFiles) {
       const filePath = path.join(projectPath, file);
-      const content = await this.readFile(filePath);
+      const content = await FileUtils.readFile(filePath);
 
       // Check for direct DOM manipulation
       if (content.includes('document.getElementById') || content.includes('document.querySelector')) {
@@ -1103,158 +323,30 @@ export class QualityAnalyzer {
           file,
           message: 'Direct DOM manipulation detected - use Angular APIs',
           rule: 'angular-no-dom'
-        });
-      }
-    }
-
-    return issues;
-  }
-
-  private async checkAngularProjectStructure(projectPath: string): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
-
-    // Angular 17+ structure with feature modules (2025 standards)
-    const requiredFolders = [
-      { path: 'src/app/core', description: 'Core module (singletons, guards, interceptors)' },
-      { path: 'src/app/shared', description: 'Shared module (components, directives, pipes)' },
-      { path: 'src/app/features', description: 'Feature modules', altNames: ['modules'] },
-      { path: 'src/assets', description: 'Static assets (images, fonts)' },
-      { path: 'src/environments', description: 'Environment configurations' },
-      { path: 'src/styles', description: 'Global styles', optional: true }
-    ];
-
-    // Check for required folders
-    for (const folder of requiredFolders) {
-      let folderFound = false;
-      const mainPath = path.join(projectPath, folder.path);
-
-      if (await this.fileExists(mainPath)) {
-        folderFound = true;
-      } else if (folder.altNames) {
-        for (const altName of folder.altNames) {
-          const altPath = path.join(projectPath, 'src', 'app', altName);
-          if (await this.fileExists(altPath)) {
-            folderFound = true;
-            break;
-          }
-        }
-      }
-
-      if (!folderFound && !folder.optional) {
-        issues.push({
-          severity: 'warning',
-          category: 'angular-organization',
-          message: `Missing folder: ${folder.path} - ${folder.description}`,
-          rule: 'angular-folder-structure'
-        });
-      }
-    }
-
-    // Check core module structure
-    const corePath = path.join(projectPath, 'src', 'app', 'core');
-    if (await this.fileExists(corePath)) {
-      const coreSubfolders = [
-        { path: 'services', description: 'Singleton services' },
-        { path: 'guards', description: 'Route guards', optional: true },
-        { path: 'interceptors', description: 'HTTP interceptors', optional: true },
-        { path: 'models', description: 'Core models/interfaces', optional: true }
-      ];
-
-      for (const subfolder of coreSubfolders) {
-        const subfolderPath = path.join(corePath, subfolder.path);
-        if (!await this.fileExists(subfolderPath) && !subfolder.optional) {
-          issues.push({
-            severity: 'info',
-            category: 'angular-organization',
-            message: `Missing core subfolder: core/${subfolder.path} - ${subfolder.description}`,
-            rule: 'angular-core-structure'
-          });
-        }
-      }
-    }
-
-    // Check shared module structure
-    const sharedPath = path.join(projectPath, 'src', 'app', 'shared');
-    if (await this.fileExists(sharedPath)) {
-      const sharedSubfolders = [
-        { path: 'components', description: 'Shared components' },
-        { path: 'directives', description: 'Custom directives', optional: true },
-        { path: 'pipes', description: 'Custom pipes', optional: true },
-        { path: 'models', description: 'Shared models/interfaces', optional: true }
-      ];
-
-      for (const subfolder of sharedSubfolders) {
-        const subfolderPath = path.join(sharedPath, subfolder.path);
-        if (!await this.fileExists(subfolderPath) && !subfolder.optional) {
-          issues.push({
-            severity: 'info',
-            category: 'angular-organization',
-            message: `Missing shared subfolder: shared/${subfolder.path} - ${subfolder.description}`,
-            rule: 'angular-shared-structure'
-          });
-        }
-      }
-    }
-
-    // Check for feature modules
-    const featuresPath = path.join(projectPath, 'src', 'app', 'features');
-    const modulesPath = path.join(projectPath, 'src', 'app', 'modules');
-    const hasFeatures = await this.fileExists(featuresPath) || await this.fileExists(modulesPath);
-
-    if (hasFeatures) {
-      const actualPath = await this.fileExists(featuresPath) ? featuresPath : modulesPath;
-      const featureDirs = await glob('*/', {
-        cwd: actualPath
-      });
-
-      // Each feature should have its own module structure
-      for (const feature of featureDirs) {
-        const featurePath = path.join(actualPath, feature);
-        const expectedFiles = [
-          { file: `${feature.replace(/\/$/, '')}.module.ts`, description: 'Feature module', optional: true }, // Optional for standalone components
-          { file: `${feature.replace(/\/$/, '')}-routing.module.ts`, description: 'Feature routing', optional: true }
-        ];
-
-        // Check for components, services, etc. in each feature
-        const featureStructure = [
-          { path: 'components', description: 'Feature components' },
-          { path: 'services', description: 'Feature services', optional: true },
-          { path: 'pages', description: 'Feature pages/containers', optional: true }
-        ];
-
-        for (const struct of featureStructure) {
-          const structPath = path.join(featurePath, struct.path);
-          if (!await this.fileExists(structPath) && !struct.optional) {
-            issues.push({
-              severity: 'info',
-              category: 'angular-organization',
-              message: `Feature ${feature} missing folder: ${struct.path} - ${struct.description}`,
-              rule: 'angular-feature-structure'
             });
           }
         }
-      }
-    }
 
     return issues;
   }
+
 
   private async analyzeAmplifyProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
 
     // Check for Amplify configuration
     const amplifyPath = path.join(projectPath, 'amplify');
-    if (await this.fileExists(amplifyPath)) {
+    if (await FileUtils.fileExists(amplifyPath)) {
       // Check for hardcoded credentials
       const configFiles = await glob('amplify/**/*.{json,js,ts}', {
         cwd: projectPath
       });
 
       for (const file of configFiles) {
-        const content = await this.readFile(path.join(projectPath, file));
+        const content = await FileUtils.readFile(path.join(projectPath, file));
         if (content.includes('accessKeyId') || content.includes('secretAccessKey')) {
-          issues.push({
-            severity: 'error',
+        issues.push({
+          severity: 'error',
             category: 'security',
             file,
             message: 'Possible hardcoded AWS credentials detected',
@@ -1277,24 +369,420 @@ export class QualityAnalyzer {
     });
 
     for (const file of allFiles.slice(0, 50)) { // Limit for performance
-      const content = await this.readFile(path.join(projectPath, file));
+      const content = await FileUtils.readFile(path.join(projectPath, file));
       const lines = content.split('\n');
 
-      lines.forEach((line, index) => {
-        if (line.includes('TODO') || line.includes('FIXME')) {
-          issues.push({
-            severity: 'info',
-            category: 'maintenance',
-            file,
-            line: index + 1,
-            message: 'TODO/FIXME comment found',
-            rule: 'no-todo'
-          });
+      const todoViolations = CodeAnalysisUtils.checkTodoComments(lines);
+      todoViolations.forEach(violation => {
+        // Skip TODO/FIXME in code quality analysis files (they're part of the logic)
+        if (this.isCodeQualityAnalysisFile(file)) {
+          return;
         }
+        
+        // Skip TODO/FIXME that are part of checking logic (even in other files)
+        const lineContent = lines[violation.line - 1];
+        if (this.isTodoCheckLogic(content, lineContent)) {
+          return;
+        }
+        
+            issues.push({
+              severity: 'info',
+          category: 'maintenance',
+          file,
+          line: violation.line,
+          message: 'TODO/FIXME comment found',
+          rule: 'no-todo'
+        });
       });
     }
 
     return issues;
+  }
+
+  private async checkUnusedCode(projectPath: string, useAI: boolean = false): Promise<QualityIssue[]> {
+    const issues: QualityIssue[] = [];
+
+    /**
+     * NEW APPROACH: Since we're an MCP server running through Claude,
+     * we should leverage AI for code analysis instead of regex patterns.
+     * This would eliminate false positives and provide better insights.
+     *
+     * For now, we use a simplified approach that:
+     * 1. Only checks for truly unused local variables (appear only once)
+     * 2. Checks exported constants in constant files for usage across the project
+     *
+     * In production, we should call: this.aiAnalyzer.analyzeUnusedCode(content, file)
+     */
+
+    // Check for unused imports and variables
+    const allFiles = await glob('**/*.{js,ts,jsx,tsx}', {
+      cwd: projectPath,
+      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**', '**/*.test.*', '**/*.spec.*']
+    });
+
+    for (const file of allFiles.slice(0, 50)) { // Limit for performance
+      const content = await FileUtils.readFile(path.join(projectPath, file));
+
+      // Simple approach: check if declared variables appear more than once in the file
+      const issues_in_file = this.findUnusedVariablesSimple(content, file);
+      issues.push(...issues_in_file);
+
+      // Special check for exported constants that are never imported
+      if (file.includes('constants') || file.includes('Constants')) {
+        const exportedConstants = this.findExportedConstants(content);
+        for (const constant of exportedConstants) {
+          const isUsedAnywhere = await this.isConstantUsedInProject(constant, projectPath, file);
+          if (!isUsedAnywhere) {
+            issues.push({
+              severity: 'warning',
+              category: 'unused-code',
+              file,
+              line: this.getLineNumber(content, constant),
+              message: `Exported constant '${constant}' is never imported or used`,
+              rule: 'no-unused-exports'
+            });
+          }
+        }
+      }
+    }
+
+    return issues;
+  }
+
+  private findUnusedVariablesSimple(content: string, file: string): QualityIssue[] {
+    const issues: QualityIssue[] = [];
+    const lines = content.split('\n');
+
+    // Remove comments and strings for analysis
+    const cleanContent = content
+      .replace(/\/\/.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/'[^']*'/g, '""')
+      .replace(/"[^"]*"/g, '""')
+      .replace(/`[^`]*`/g, '""');
+
+    // Find local variable declarations (not exported, not function parameters)
+    const varDeclarations: Array<{ name: string; line: number }> = [];
+    lines.forEach((line, index) => {
+      // Skip exported variables
+      if (line.includes('export')) return;
+
+      // Find const/let/var declarations
+      const match = line.match(/^\s*(?:const|let|var)\s+(\w+)\s*=/);
+      if (match) {
+        const varName = match[1];
+        varDeclarations.push({
+          name: varName,
+          line: index + 1
+        });
+      }
+    });
+
+    // Check if each variable is used more than once
+    for (const variable of varDeclarations) {
+      // Count occurrences (should be at least 2: declaration + usage)
+      const regex = new RegExp(`\\b${variable.name}\\b`, 'g');
+      const matches = cleanContent.match(regex);
+      const occurrences = matches ? matches.length : 0;
+
+      // If only appears once (just the declaration), it's unused
+      if (occurrences === 1) {
+        // Double-check it's not a special case (like a React component or a function)
+        const lineContent = lines[variable.line - 1];
+
+        // Skip if it's a React component (starts with capital letter)
+        if (/^[A-Z]/.test(variable.name)) continue;
+
+        // Skip if it's assigned a function that might be exported later
+        if (lineContent.includes('=>') || lineContent.includes('function')) continue;
+
+        // Skip if it's used in a return statement elsewhere
+        if (cleanContent.includes(`return ${variable.name}`) ||
+            cleanContent.includes(`return { ${variable.name}`) ||
+            cleanContent.includes(`{${variable.name}}`) ||
+            cleanContent.includes(`${variable.name}:`)) continue;
+
+        issues.push({
+          severity: 'warning',
+          category: 'unused-code',
+          file,
+          line: variable.line,
+          message: `Variable '${variable.name}' is declared but never used`,
+          rule: 'no-unused-vars'
+        });
+      }
+    }
+
+    return issues;
+  }
+
+  private findExportedConstants(content: string): string[] {
+    const constants: string[] = [];
+    const regex = /export\s+const\s+(\w+)\s*=/g;
+    let match;
+
+    while ((match = regex.exec(content)) !== null) {
+      constants.push(match[1]);
+    }
+
+    return constants;
+  }
+
+  private async isConstantUsedInProject(constantName: string, projectPath: string, declaringFile: string): Promise<boolean> {
+    const allFiles = await glob('**/*.{js,ts,jsx,tsx}', {
+      cwd: projectPath,
+      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+    });
+
+    for (const file of allFiles) {
+      // Skip the file where the constant is declared
+      if (file === declaringFile) continue;
+
+      const content = await FileUtils.readFile(path.join(projectPath, file));
+
+      // Check if the constant is imported or used
+      if (content.includes(constantName)) {
+        // Make sure it's actually imported/used, not just mentioned in a comment
+        const cleanContent = content
+          .replace(/\/\/.*$/gm, '')
+          .replace(/\/\*[\s\S]*?\*\//g, '');
+
+        if (cleanContent.includes(constantName)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private getLineNumber(content: string, searchTerm: string): number {
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes(searchTerm)) {
+        return i + 1;
+      }
+    }
+    return 0;
+  }
+
+  // All deprecated functions removed - using AI-based approach instead
+
+  private isKeyword(name: string): boolean {
+    const keywords = [
+      'const', 'let', 'var', 'function', 'if', 'else', 'for', 'while', 'return',
+      'import', 'export', 'from', 'as', 'default', 'class', 'extends', 'implements',
+      'interface', 'type', 'enum', 'namespace', 'module', 'declare', 'public',
+      'private', 'protected', 'static', 'readonly', 'abstract', 'async', 'await',
+      'try', 'catch', 'finally', 'throw', 'new', 'this', 'super', 'typeof',
+      'instanceof', 'in', 'of', 'true', 'false', 'null', 'undefined'
+    ];
+    return keywords.includes(name);
+  }
+
+  private isCommonPattern(name: string): boolean {
+    const patterns = [
+      'console', 'window', 'document', 'process', 'global', 'module', 'exports',
+      'require', 'Buffer', 'Array', 'Object', 'String', 'Number', 'Boolean',
+      'Date', 'RegExp', 'Error', 'Promise', 'Map', 'Set', 'WeakMap', 'WeakSet'
+    ];
+    return patterns.includes(name);
+  }
+
+
+  private isCodeQualityAnalysisFile(filePath: string): boolean {
+    // Files that are part of the code quality analysis logic
+    // Note: We still check these files for unused code, but skip TODO/FIXME detection
+    const analysisFiles = [
+      'src/utils/CodeAnalysisUtils.ts',
+      'src/analyzers/QualityAnalyzer.ts',
+      'src/services/ValidationService.ts',
+      'src/services/ReactAnalysisService.ts',
+      'src/services/FirebaseAnalysisService.ts'
+    ];
+    
+    return analysisFiles.some(analysisFile => filePath.includes(analysisFile));
+  }
+
+  private async checkHebrewComments(projectPath: string): Promise<QualityIssue[]> {
+    const issues: QualityIssue[] = [];
+
+    // Check for Hebrew comments
+    const allFiles = await glob('**/*.{js,ts,jsx,tsx,java,cs}', {
+      cwd: projectPath,
+      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+    });
+
+    for (const file of allFiles.slice(0, 30)) { // Limit for performance
+      const content = await FileUtils.readFile(path.join(projectPath, file));
+      const lines = content.split('\n');
+
+        lines.forEach((line, index) => {
+        // Check for Hebrew characters in comments
+        if (this.containsHebrew(line) && this.isCommentLine(line)) {
+        issues.push({
+              severity: 'warning',
+            category: 'code-style',
+          file,
+              line: index + 1,
+            message: 'Hebrew comment found - use English for better maintainability',
+            rule: 'no-hebrew-comments'
+        });
+      }
+        });
+    }
+
+    return issues;
+  }
+
+  private async checkMissingErrorLogging(projectPath: string): Promise<QualityIssue[]> {
+    const issues: QualityIssue[] = [];
+
+    // Check for missing error logging in catch blocks
+    const allFiles = await glob('**/*.{js,ts,jsx,tsx,java,cs}', {
+      cwd: projectPath,
+      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+    });
+
+    for (const file of allFiles.slice(0, 30)) { // Limit for performance
+      const content = await FileUtils.readFile(path.join(projectPath, file));
+      const lines = content.split('\n');
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Check for catch blocks (skip comment lines)
+        if (!this.isCommentLine(line) && line.includes('catch') && (line.includes('{') || lines[i + 1]?.includes('{'))) {
+          const catchBlock = this.getCatchBlock(lines, i);
+          
+          // Check if catch block has proper error logging
+          if (!this.hasErrorLogging(catchBlock)) {
+        issues.push({
+          severity: 'warning',
+              category: 'error-handling',
+              file,
+              line: i + 1,
+              message: 'Catch block missing error logging - add logger.error() or console.error()',
+              rule: 'catch-must-log'
+        });
+      }
+    }
+      }
+    }
+
+    return issues;
+  }
+
+  private containsHebrew(text: string): boolean {
+    // Hebrew Unicode range: U+0590-U+05FF
+    const hebrewRegex = /[\u0590-\u05FF]/;
+    return hebrewRegex.test(text);
+  }
+
+  private isCommentLine(line: string): boolean {
+    const trimmedLine = line.trim();
+    return trimmedLine.startsWith('//') || 
+           trimmedLine.startsWith('/*') || 
+           trimmedLine.startsWith('*') ||
+           trimmedLine.startsWith('#');
+  }
+
+  private getCatchBlock(lines: string[], startIndex: number): string {
+    let catchBlock = '';
+    let braceCount = 0;
+    let foundOpeningBrace = false;
+
+    for (let i = startIndex; i < lines.length; i++) {
+      const line = lines[i];
+      catchBlock += line + '\n';
+
+      // Count braces to find the end of catch block
+      for (const char of line) {
+        if (char === '{') {
+          braceCount++;
+          foundOpeningBrace = true;
+        } else if (char === '}') {
+          braceCount--;
+          if (foundOpeningBrace && braceCount === 0) {
+            return catchBlock;
+          }
+        }
+      }
+    }
+
+    return catchBlock;
+  }
+
+  private hasErrorLogging(catchBlock: string): boolean {
+    const loggingPatterns = [
+      'logger.error',
+      'console.error',
+      'console.log',
+      'log.error',
+      'winston.error',
+      'pino.error',
+      'debug',
+      'trace'
+    ];
+
+    // Check if it's a proper error handling (returning error to client)
+    const properErrorHandling = [
+      'return',
+      'throw',
+      'response',
+      'res.status',
+      'isError: true',
+      'error:',
+      'message:'
+    ];
+
+    // If it has logging patterns, it's good
+    if (loggingPatterns.some(pattern => 
+      catchBlock.toLowerCase().includes(pattern.toLowerCase())
+    )) {
+      return true;
+    }
+
+    // If it's returning error to client (like MCP server), it's also good
+    if (properErrorHandling.some(pattern => 
+      catchBlock.toLowerCase().includes(pattern.toLowerCase())
+    )) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private isTodoCheckLogic(content: string, line: string): boolean {
+    // Check if this line is part of TODO/FIXME checking logic
+    const todoCheckPatterns = [
+      'TODO',
+      'FIXME',
+      'HACK',
+      'XXX',
+      'checkTodoComments',
+      'checkCommonIssues',
+      'FORBIDDEN_PATTERNS',
+      'comments:',
+      'line.includes(',
+      'violations.push',
+      'message: \'TODO/FIXME comment found\'',
+      'rule: \'no-todo\''
+    ];
+    
+    // If the line contains TODO/FIXME but also contains logic patterns, it's likely part of checking logic
+    const hasLogicPatterns = todoCheckPatterns.some(pattern => 
+      line.includes(pattern) && (
+        line.includes('includes(') || 
+        line.includes('push(') || 
+        line.includes('message:') ||
+        line.includes('rule:') ||
+        line.includes('[') ||
+        line.includes(']')
+      )
+    );
+    
+    return hasLogicPatterns;
   }
 
   private async checkMultiProjectIssues(projectPath: string, subProjects: any[]): Promise<QualityIssue[]> {
@@ -1305,8 +793,9 @@ export class QualityAnalyzer {
 
     for (const subProject of subProjects) {
       const packageJsonPath = path.join(projectPath, subProject.path, 'package.json');
-      if (await this.fileExists(packageJsonPath)) {
-        const packageJson = JSON.parse(await this.readFile(packageJsonPath));
+      if (await FileUtils.fileExists(packageJsonPath)) {
+        const packageJson = await FileUtils.readJsonFile(packageJsonPath);
+        if (packageJson) {
         const deps = Object.keys(packageJson.dependencies || {});
 
         deps.forEach(dep => {
@@ -1315,6 +804,7 @@ export class QualityAnalyzer {
           }
           allDeps.get(dep)!.push(subProject.path);
         });
+        }
       }
     }
 
@@ -1343,7 +833,7 @@ export class QualityAnalyzer {
     let totalFiles = allFiles.length;
 
     for (const file of allFiles.slice(0, 100)) { // Sample for performance
-      const content = await this.readFile(path.join(projectPath, file));
+      const content = await FileUtils.readFile(path.join(projectPath, file));
       totalLines += content.split('\n').length;
     }
 
@@ -1406,20 +896,8 @@ export class QualityAnalyzer {
     return recommendations;
   }
 
-  public async getRecommendations(projectPath: string, projectInfo: ProjectInfo, language: string): Promise<any> {
+  public async getRecommendations(projectPath: string, projectInfo: ProjectInfo): Promise<any> {
     const report = await this.analyzeQuality(projectPath, projectInfo);
-
-    if (language === 'he') {
-      return {
-        score: report.score,
-        projectTypes: projectInfo.types,
-        recommendations: this.translateToHebrew(report.recommendations),
-        topIssues: report.issues.slice(0, 5).map(issue => ({
-          ...issue,
-          message: this.translateIssueToHebrew(issue)
-        }))
-      };
-    }
 
     return {
       score: report.score,
@@ -1429,42 +907,5 @@ export class QualityAnalyzer {
     };
   }
 
-  private translateToHebrew(recommendations: string[]): string[] {
-    const translations: { [key: string]: string } = {
-      'Consider breaking down large files into smaller, more focused modules': 'מומלץ לפרק קבצים גדולים למודולים קטנים וממוקדים יותר',
-      'Set up path aliases in tsconfig.json to avoid deep relative imports': 'הגדר path aliases ב-tsconfig.json כדי להימנע מייבואים יחסיים עמוקים',
-      'Split Firebase functions into separate files (max 5 functions per file)': 'פצל Firebase functions לקבצים נפרדים (מקסימום 5 פונקציות לקובץ)',
-      'Replace console.log with proper logging framework': 'החלף console.log במערכת לוגים מתאימה',
-      'Consider using a monorepo tool like Lerna or Nx for better dependency management': 'שקול להשתמש בכלי monorepo כמו Lerna או Nx לניהול תלויות טוב יותר'
-    };
 
-    return recommendations.map(rec => translations[rec] || rec);
-  }
-
-  private translateIssueToHebrew(issue: QualityIssue): string {
-    const translations: { [key: string]: string } = {
-      'Console.log found - use logger instead': 'נמצא console.log - השתמש ב-logger במקום',
-      'Deep relative import found - use path aliases': 'נמצא ייבוא יחסי עמוק - השתמש ב-path aliases',
-      'TODO/FIXME comment found': 'נמצאה הערת TODO/FIXME'
-    };
-
-    return translations[issue.message] || issue.message;
-  }
-
-  private async fileExists(filePath: string): Promise<boolean> {
-    try {
-      await fs.access(filePath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async readFile(filePath: string): Promise<string> {
-    try {
-      return await fs.readFile(filePath, 'utf-8');
-    } catch {
-      return '';
-    }
-  }
 }

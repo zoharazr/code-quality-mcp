@@ -1,38 +1,11 @@
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import { glob } from 'glob';
+import { FileUtils } from '../utils/FileUtils.js';
+import { ProjectInfo, SubProjectInfo } from '../types/QualityTypes.js';
 
-export interface ProjectInfo {
-  types: string[];
-  isMultiProject: boolean;
-  subProjects?: SubProjectInfo[];
-  mainFramework?: string;
-}
-
-export interface SubProjectInfo {
-  path: string;
-  type: string;
-  dependencies?: string[];
-}
+export { ProjectInfo, SubProjectInfo };
 
 export class ProjectDetector {
-  private async fileExists(filePath: string): Promise<boolean> {
-    try {
-      await fs.access(filePath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  private async readJsonFile(filePath: string): Promise<any> {
-    try {
-      const content = await fs.readFile(filePath, 'utf-8');
-      return JSON.parse(content);
-    } catch {
-      return null;
-    }
-  }
 
   public async detectProject(projectPath: string, deep: boolean = true): Promise<ProjectInfo> {
     const detectedTypes = new Set<string>();
@@ -40,22 +13,22 @@ export class ProjectDetector {
 
     // Check for package.json (Node.js based projects)
     const packageJsonPath = path.join(projectPath, 'package.json');
-    if (await this.fileExists(packageJsonPath)) {
-      const packageJson = await this.readJsonFile(packageJsonPath);
+    if (await FileUtils.fileExists(packageJsonPath)) {
+      const packageJson = await FileUtils.readJsonFile(packageJsonPath);
       if (packageJson) {
         await this.detectNodeProject(packageJson, detectedTypes);
       }
     }
 
     // Check for React Native
-    if (await this.fileExists(path.join(projectPath, 'app.json')) ||
-        await this.fileExists(path.join(projectPath, 'metro.config.js'))) {
+    if (await FileUtils.fileExists(path.join(projectPath, 'app.json')) ||
+        await FileUtils.fileExists(path.join(projectPath, 'metro.config.js'))) {
       detectedTypes.add('react-native');
     }
 
     // Check for Java/Spring
-    if (await this.fileExists(path.join(projectPath, 'pom.xml')) ||
-        await this.fileExists(path.join(projectPath, 'build.gradle'))) {
+    if (await FileUtils.fileExists(path.join(projectPath, 'pom.xml')) ||
+        await FileUtils.fileExists(path.join(projectPath, 'build.gradle'))) {
       detectedTypes.add('java');
     }
 
@@ -66,14 +39,14 @@ export class ProjectDetector {
     }
 
     // Check for Angular
-    if (await this.fileExists(path.join(projectPath, 'angular.json'))) {
+    if (await FileUtils.fileExists(path.join(projectPath, 'angular.json'))) {
       detectedTypes.add('angular');
     }
 
     // Check for Firebase Functions
     const functionsPath = path.join(projectPath, 'functions');
-    if (await this.fileExists(functionsPath)) {
-      const functionsPackageJson = await this.readJsonFile(path.join(functionsPath, 'package.json'));
+    if (await FileUtils.fileExists(functionsPath)) {
+      const functionsPackageJson = await FileUtils.readJsonFile(path.join(functionsPath, 'package.json'));
       if (functionsPackageJson?.dependencies?.['firebase-functions']) {
         detectedTypes.add('firebase-functions');
         subProjects.push({
@@ -85,7 +58,7 @@ export class ProjectDetector {
     }
 
     // Check for AWS Amplify
-    if (await this.fileExists(path.join(projectPath, 'amplify'))) {
+    if (await FileUtils.fileExists(path.join(projectPath, 'amplify'))) {
       detectedTypes.add('aws-amplify');
     }
 
@@ -137,6 +110,11 @@ export class ProjectDetector {
       detectedTypes.add('nodejs');
     }
 
+    // Basic Node.js project (if no specific framework detected but has Node.js dependencies)
+    if (detectedTypes.size === 0 && (deps['@types/node'] || deps['typescript'] || deps['tsx'])) {
+      detectedTypes.add('nodejs');
+    }
+
     // Vue.js
     if (deps['vue'] || deps['nuxt']) {
       detectedTypes.add('vue');
@@ -166,7 +144,7 @@ export class ProjectDetector {
 
       for (const match of matches) {
         const subPath = path.join(projectPath, match);
-        const subPackageJson = await this.readJsonFile(path.join(subPath, 'package.json'));
+        const subPackageJson = await FileUtils.readJsonFile(path.join(subPath, 'package.json'));
 
         if (subPackageJson) {
           const subTypes = new Set<string>();
