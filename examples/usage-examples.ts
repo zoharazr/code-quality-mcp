@@ -3,13 +3,20 @@
  * CODE QUALITY MCP SERVER - USAGE EXAMPLES
  * ====================================================================
  *
+ * @skip-quality-check
+ *
  * This file demonstrates how to use the Code Quality MCP Server
  * in different scenarios.
  *
  * The server provides HYBRID analysis:
  * - FAST MODE: Logic-based checks (regex patterns)
  * - DEEP MODE: AI-powered analysis (Claude)
+ *
+ * NOTE: This is a documentation/examples file.
+ * Variables are intentionally not used - they serve as copy-paste examples.
  */
+
+/* eslint-disable @typescript-eslint/no-unused-vars */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -82,7 +89,66 @@ async function exampleConnectAndAnalyze() {
 }
 
 // ====================================================================
-// EXAMPLE 3: Fast Mode Analysis (Development)
+// EXAMPLE 3: Pagination - Getting Results Page by Page
+// ====================================================================
+/**
+ * When dealing with large projects with many issues,
+ * use pagination to get results in manageable chunks
+ */
+
+// Get first page (issues 1-50)
+const paginationExample1 = {
+  tool: 'check_quality',
+  arguments: {
+    projectPath: '/path/to/large/project',
+    page: 1,
+    pageSize: 50  // Default: 50, Max: 100
+  }
+};
+
+/* Response includes pagination info:
+{
+  issues: [...], // 50 issues for current page
+  pagination: {
+    currentPage: 1,
+    pageSize: 50,
+    totalIssues: 500,
+    totalPages: 10,
+    hasNextPage: true,
+    hasPrevPage: false,
+    issuesOnCurrentPage: 50,
+    startIndex: 1,
+    endIndex: 50
+  },
+  issuesSummary: {
+    byCategory: { "unused-code": 300, "code-style": 150, "security": 50 },
+    bySeverity: { "error": 100, "warning": 200, "info": 200 }
+  }
+}
+*/
+
+// Get second page (issues 51-100)
+const paginationExample2 = {
+  tool: 'check_quality',
+  arguments: {
+    projectPath: '/path/to/large/project',
+    page: 2,
+    pageSize: 50
+  }
+};
+
+// Get smaller chunks for easier review
+const paginationExample3 = {
+  tool: 'check_quality',
+  arguments: {
+    projectPath: '/path/to/large/project',
+    page: 1,
+    pageSize: 10  // Get only 10 issues at a time
+  }
+};
+
+// ====================================================================
+// EXAMPLE 4: Fast Mode Analysis (Development)
 // ====================================================================
 
 /**
@@ -276,9 +342,9 @@ const recommendationsExample = {
  *   "score": 85,
  *   "projectTypes": ["nodejs"],
  *   "recommendations": [
- *     "השתמש ב-path aliases כדי למנוע imports עמוקים",
- *     "הוסף TypeScript לפרויקט לשיפור type safety",
- *     "העבר console.log למערכת logging מסודרת"
+ *     "Use path aliases to avoid deep imports",
+ *     "Add TypeScript to improve type safety",
+ *     "Replace console.log with proper logging system"
  *   ],
  *   "topIssues": [
  *     {

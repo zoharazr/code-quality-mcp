@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ProjectDetector } from './detectors/ProjectDetector.js';
 import { QualityAnalyzer } from './analyzers/QualityAnalyzer.js';
+import { AnalysisStorage } from './services/AnalysisStorage.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -81,6 +82,16 @@ const tools: Tool[] = [
           type: 'boolean',
           description: 'Check for security issues (requires deep analysis). Default: false',
           default: false,
+        },
+        page: {
+          type: 'number',
+          description: 'Page number for paginated results. Default: 1',
+          default: 1,
+        },
+        pageSize: {
+          type: 'number',
+          description: 'Number of issues per page. Default: 50, Max: 100',
+          default: 50,
         }
       },
       required: ['projectPath'],
@@ -98,8 +109,50 @@ const tools: Tool[] = [
         },
         language: {
           type: 'string',
-          description: 'Language for recommendations (he/en)',
-          default: 'he',
+          description: 'Language for recommendations (en/he)',
+          default: 'en',
+        }
+      },
+      required: ['projectPath'],
+    },
+  },
+  {
+    name: 'get_smart_summary',
+    description: 'Get a concise, actionable summary of code quality instead of full issue list',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to the project',
+        }
+      },
+      required: ['projectPath'],
+    },
+  },
+  {
+    name: 'get_quick_wins',
+    description: 'Get high-impact, low-effort fixes to quickly improve code quality score',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to the project',
+        }
+      },
+      required: ['projectPath'],
+    },
+  },
+  {
+    name: 'get_trends',
+    description: 'See how code quality is improving or degrading over time',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectPath: {
+          type: 'string',
+          description: 'Path to the project',
         }
       },
       required: ['projectPath'],
@@ -121,6 +174,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const detector = new ProjectDetector();
     const analyzer = new QualityAnalyzer();
+    const storage = new AnalysisStorage();
 
     switch (name) {
       case 'analyze_project': {
@@ -142,6 +196,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const projectPath = args?.projectPath as string;
         const projectTypeOverride = args?.projectType as string | undefined;
 
+        // Pagination parameters
+        const page = Math.max(1, (args?.page as number) || 1);
+        const pageSize = Math.min(100, Math.max(1, (args?.pageSize as number) || 50));
+
         // Extract analysis options
         const options = {
           deepAnalysis: args?.deepAnalysis as boolean ?? false,
@@ -157,11 +215,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const qualityReport = await analyzer.analyzeQuality(projectPath, projectInfo, options);
 
+        // Pagination logic
+        const startIndex = (page - 1) * pageSize;
+        const endIndex = startIndex + pageSize;
+        const paginatedIssues = qualityReport.issues.slice(startIndex, endIndex);
+        const totalPages = Math.ceil(qualityReport.issues.length / pageSize);
+
+        // Create paginated report
+        const limitedReport = {
+          ...qualityReport,
+          issues: paginatedIssues,
+          pagination: {
+            currentPage: page,
+            pageSize: pageSize,
+            totalIssues: qualityReport.issues.length,
+            totalPages: totalPages,
+            hasNextPage: page < totalPages,
+            hasPrevPage: page > 1,
+            issuesOnCurrentPage: paginatedIssues.length,
+            startIndex: startIndex + 1, // 1-indexed for user clarity
+            endIndex: Math.min(endIndex, qualityReport.issues.length)
+          },
+          issuesSummary: {
+            byCategory: qualityReport.issues.reduce((acc, issue) => {
+              acc[issue.category] = (acc[issue.category] || 0) + 1;
+              return acc;
+            }, {} as Record<string, number>),
+            bySeverity: qualityReport.issues.reduce((acc, issue) => {
+              acc[issue.severity] = (acc[issue.severity] || 0) + 1;
+              return acc;
+            }, {} as Record<string, number>)
+          }
+        };
+
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(qualityReport, null, 2),
+              text: JSON.stringify(limitedReport, null, 2),
             },
           ],
         };
@@ -178,6 +269,75 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: JSON.stringify(recommendations, null, 2),
+            },
+          ],
+        };
+      }
+
+      case 'get_smart_summary': {
+        const projectPath = args?.projectPath as string;
+
+        // Run analysis
+        const projectInfo = await detector.detectProject(projectPath, true);
+        const qualityReport = await analyzer.analyzeQuality(projectPath, projectInfo, {});
+
+        // Save for trends
+        await storage.saveAnalysis(projectPath, qualityReport);
+
+        // Generate summary
+        const summary = storage.generateSmartSummary(qualityReport);
+        const formatted = storage.formatSmartSummary(summary);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: formatted,
+            },
+          ],
+        };
+      }
+
+      case 'get_quick_wins': {
+        const projectPath = args?.projectPath as string;
+
+        // Run analysis
+        const projectInfo = await detector.detectProject(projectPath, true);
+        const qualityReport = await analyzer.analyzeQuality(projectPath, projectInfo, {});
+
+        // Generate quick wins
+        const quickWins = storage.generateQuickWins(qualityReport);
+        const formatted = storage.formatQuickWins(quickWins);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: formatted,
+            },
+          ],
+        };
+      }
+
+      case 'get_trends': {
+        const projectPath = args?.projectPath as string;
+
+        // Run analysis
+        const projectInfo = await detector.detectProject(projectPath, true);
+        const qualityReport = await analyzer.analyzeQuality(projectPath, projectInfo, {});
+
+        // Generate trends (compares with previous)
+        const trends = await storage.generateTrends(projectPath, qualityReport);
+        const formatted = storage.formatTrends(trends);
+
+        // Save current for next comparison
+        await storage.saveAnalysis(projectPath, qualityReport);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: formatted,
             },
           ],
         };

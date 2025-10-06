@@ -13,10 +13,58 @@ export class QualityAnalyzer {
   private firebaseAnalysisService: FirebaseAnalysisService;
   private aiAnalyzer: AICodeAnalyzer;
 
+  // Smart ignore patterns - expanded for all project types
+  private readonly IGNORE_PATTERNS = [
+    'node_modules/**',
+    '.git/**',
+    'build/**',
+    'dist/**',
+    'out/**',
+    'target/**',
+    'bin/**',
+    'obj/**',
+    'coverage/**',
+    '.next/**',
+    '.nuxt/**',
+    '.cache/**',
+    '.vercel/**',
+    'vendor/**',
+    'Pods/**',
+    '**/*.test.*',
+    '**/*.spec.*',
+    '**/*.min.js',
+    '**/*.bundle.js',
+    'examples/**',  // Documentation/example files - intentionally have unused vars
+    // React Native specific
+    'android/gradle/**',
+    'android/build/**',
+    'android/app/build/**',
+    'ios/Pods/**',
+    'ios/build/**',
+    'ios/*.xcworkspace/**',
+    'ios/*.xcodeproj/xcuserdata/**',
+    'ios/*.xcodeproj/project.xcworkspace/**'
+  ];
+
   constructor() {
     this.reactAnalysisService = new ReactAnalysisService();
     this.firebaseAnalysisService = new FirebaseAnalysisService();
     this.aiAnalyzer = new AICodeAnalyzer();
+  }
+
+  private getIgnorePatternsForProject(projectTypes: string[]): string[] {
+    const patterns = [...this.IGNORE_PATTERNS];
+
+    if (projectTypes.includes('react-native')) {
+      // For React Native, be more aggressive with android/ios ignoring
+      patterns.push(
+        'android/**/*.gradle',
+        'android/gradlew*',
+        'ios/Podfile.lock'
+      );
+    }
+
+    return patterns;
   }
 
   /**
@@ -123,10 +171,11 @@ export class QualityAnalyzer {
   ): Promise<{ issues: QualityIssue[]; insights: string[] }> {
     const issues: QualityIssue[] = [];
     const insights: string[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     const allFiles = await glob('**/*.{js,ts,jsx,tsx}', {
       cwd: projectPath,
-      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**', '**/*.test.*', '**/*.spec.*']
+      ignore: ignorePatterns
     });
 
     // Analyze a sample of files with AI (limit to avoid costs)
@@ -190,6 +239,7 @@ export class QualityAnalyzer {
 
   private async analyzeNodeProject(projectPath: string, variant: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check Node.js project organization (2025 standards)
 
@@ -236,11 +286,12 @@ export class QualityAnalyzer {
 
   private async analyzeJavaProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check for Java specific issues
     const javaFiles = await glob('**/*.java', {
         cwd: projectPath,
-      ignore: ['target/**', 'build/**']
+      ignore: ignorePatterns
     });
 
     for (const file of javaFiles) {
@@ -269,11 +320,12 @@ export class QualityAnalyzer {
 
   private async analyzeDotNetProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check for .NET specific issues
     const csFiles = await glob('**/*.cs', {
         cwd: projectPath,
-      ignore: ['bin/**', 'obj/**']
+      ignore: ignorePatterns
     });
 
     for (const file of csFiles) {
@@ -304,11 +356,12 @@ export class QualityAnalyzer {
 
   private async analyzeAngularProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check Angular specific patterns
     const componentFiles = await glob('src/**/*.component.ts', {
       cwd: projectPath,
-      ignore: ['node_modules/**']
+      ignore: ignorePatterns
     });
 
     for (const file of componentFiles) {
@@ -333,6 +386,7 @@ export class QualityAnalyzer {
 
   private async analyzeAmplifyProject(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check for Amplify configuration
     const amplifyPath = path.join(projectPath, 'amplify');
@@ -361,11 +415,12 @@ export class QualityAnalyzer {
 
   private async checkCommonIssues(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check for TODO comments
     const allFiles = await glob('**/*.{js,ts,jsx,tsx,java,cs}', {
       cwd: projectPath,
-      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+      ignore: ignorePatterns
     });
 
     for (const file of allFiles.slice(0, 50)) { // Limit for performance
@@ -401,6 +456,7 @@ export class QualityAnalyzer {
 
   private async checkUnusedCode(projectPath: string, useAI: boolean = false): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     /**
      * NEW APPROACH: Since we're an MCP server running through Claude,
@@ -417,11 +473,18 @@ export class QualityAnalyzer {
     // Check for unused imports and variables
     const allFiles = await glob('**/*.{js,ts,jsx,tsx}', {
       cwd: projectPath,
-      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**', '**/*.test.*', '**/*.spec.*']
+      ignore: ignorePatterns
     });
 
     for (const file of allFiles.slice(0, 50)) { // Limit for performance
-      const content = await FileUtils.readFile(path.join(projectPath, file));
+      const filePath = path.join(projectPath, file);
+
+      // Skip files marked with @skip-quality-check
+      if (await this.shouldSkipFile(filePath)) {
+        continue;
+      }
+
+      const content = await FileUtils.readFile(filePath);
 
       // Simple approach: check if declared variables appear more than once in the file
       const issues_in_file = this.findUnusedVariablesSimple(content, file);
@@ -529,9 +592,10 @@ export class QualityAnalyzer {
   }
 
   private async isConstantUsedInProject(constantName: string, projectPath: string, declaringFile: string): Promise<boolean> {
+    const ignorePatterns = this.IGNORE_PATTERNS;
     const allFiles = await glob('**/*.{js,ts,jsx,tsx}', {
       cwd: projectPath,
-      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+      ignore: ignorePatterns
     });
 
     for (const file of allFiles) {
@@ -600,17 +664,28 @@ export class QualityAnalyzer {
       'src/services/ReactAnalysisService.ts',
       'src/services/FirebaseAnalysisService.ts'
     ];
-    
+
     return analysisFiles.some(analysisFile => filePath.includes(analysisFile));
+  }
+
+  private async shouldSkipFile(filePath: string): Promise<boolean> {
+    // Check if file has @skip-quality-check marker
+    try {
+      const content = await FileUtils.readFile(filePath);
+      return content.includes('@skip-quality-check');
+    } catch {
+      return false;
+    }
   }
 
   private async checkHebrewComments(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check for Hebrew comments
     const allFiles = await glob('**/*.{js,ts,jsx,tsx,java,cs}', {
       cwd: projectPath,
-      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+      ignore: ignorePatterns
     });
 
     for (const file of allFiles.slice(0, 30)) { // Limit for performance
@@ -637,11 +712,12 @@ export class QualityAnalyzer {
 
   private async checkMissingErrorLogging(projectPath: string): Promise<QualityIssue[]> {
     const issues: QualityIssue[] = [];
+    const ignorePatterns = this.IGNORE_PATTERNS;
 
     // Check for missing error logging in catch blocks
     const allFiles = await glob('**/*.{js,ts,jsx,tsx,java,cs}', {
       cwd: projectPath,
-      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+      ignore: ignorePatterns
     });
 
     for (const file of allFiles.slice(0, 30)) { // Limit for performance
@@ -824,9 +900,10 @@ export class QualityAnalyzer {
   }
 
   private async calculateStats(projectPath: string): Promise<QualityStats> {
+    const ignorePatterns = this.IGNORE_PATTERNS;
     const allFiles = await glob('**/*.{js,ts,jsx,tsx,java,cs}', {
       cwd: projectPath,
-      ignore: ['node_modules/**', 'build/**', 'dist/**', 'target/**']
+      ignore: ignorePatterns
     });
 
     let totalLines = 0;

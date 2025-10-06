@@ -9,7 +9,10 @@
       "Bash(npm start)",
       "Bash(node:*)",
       "Bash(tree:*)",
-      "Bash(npx tsx:*)"
+      "Bash(npx tsx:*)",
+      "Bash(cat:*)",
+      "Bash(git rm:*)",
+      "Read(//Users/zoharazriel/Library/**)"
     ],
     "deny": [],
     "ask": []
